@@ -10,55 +10,154 @@ from collections import deque
 
 class Agent(object):
 
-    def __init__(self, gamma=0.99, observe=10000, intial_epsilon=0.0001,final_epsilon=0.0001,
-                 explore_frames=200000, replay_memory=50000, batch_size=32, save_freq):
-        self.GAMMA = 0.99  # decay rate of past observations
-        self.OBSERVE = 100000.  # to fill the replay memory
+    def __init__(self, actions=2, gamma=0.99, observe=100000., initial_epsilon=0.0001,final_epsilon=0.0001,
+                 explore_frames=2000000., memory_frames=50000, batch_size=32, save_freq=10000):
+        self.GAMMA = gamma  # decay rate of past observations
+        self.OBSERVE = observe  # to fill the replay memory
 
-        self.INITIAL_EPSILON = 0.0001  # starting value of epsilon
-        self.FINAL_EPSILON = 0.0001  # final value of epsilon
-        self.EXPLORE_FRAMES = 2000000.  # frames over which to anneal epsilon
+        self.INITIAL_EPSILON = initial_epsilon  # starting value of epsilon
+        self.FINAL_EPSILON = final_epsilon  # final value of epsilon
+        self.EXPLORE_FRAMES = explore_frames  # frames over which to anneal epsilon
 
-        self.REPLAY_MEMORY = 50000  # number of previous transitions to remember
-        self.BATCH_SIZE = 32  # size of minibatch
-        self.FRAME_PER_ACTION = 1
+        self.MEMORY_FRAMES = memory_frames  # number of previous transitions to remember
+        self.BATCH_SIZE = batch_size  # size of minibatch
+        self.FRAMES_PER_ACTION = 1
 
-        self.ACTIONS = 2
+        self.ACTIONS = actions
+        self.SAVE_FREQ = save_freq
+        self.STATE = 'OBSERVE'
+        self.GAME_NAME = 'FLAPPY'
 
-        def build_network(self):
-            # define the cnn
-            W_conv1 = weight_variable([8, 8, 4, 32])
-            b_conv1 = bias_variable([32])
+        self.itr_num = -1
+        self.cur_action =np.zeros(self.ACTIONS)
+        self.epsilon = self.INITIAL_EPSILON
 
-            W_conv2 = weight_variable([4, 4, 32, 64])
-            b_conv2 = bias_variable([64])
+        self.prev_state = None
+        self.prev_reward = None
 
-            W_conv3 = weight_variable([3, 3, 64, 64])
-            b_conv3 = bias_variable([64])
+        self.memory = deque()
+        self.session = tf.InteractiveSession()
+        self.saver = self._init_saver()
 
-            W_fc1 = weight_variable([1600, 512])
-            b_fc1 = bias_variable([512])
+    def _init_saver(self, path="saved_networks"):
+        # loading weights
+        saver = tf.train.Saver()
+        self.session.run(tf.initialize_all_variables())
+        checkpoint = tf.train.get_checkpoint_state(path)
+        if checkpoint and checkpoint.model_checkpoint_path:
+            saver.restore(self.session, checkpoint.model_checkpoint_path)
+            print("Successfully loaded:", checkpoint.model_checkpoint_path)
+        return saver
 
-            W_fc2 = weight_variable([512, self.ACTIONS])
-            b_fc2 = bias_variable([self.ACTIONS])
+    def build_model(self):
+        # define the cnn
+        W_conv1 = tf.Variable(tf.truncated_normal([8, 8, 4, 32], stddev=0.01))
+        b_conv1 = tf.Variable(tf.constant(0.01, shape=[32]))
 
-            # hidden layers
-            h_conv1 = tf.nn.relu(conv2d(s, W_conv1, 4) + b_conv1)
-            h_pool1 = max_pool_2x2(h_conv1)
+        W_conv2 = tf.Variable(tf.truncated_normal([4, 4, 32, 64], stddev=0.01))
+        b_conv2 = tf.Variable(tf.constant(0.01, shape=[64]))
+
+        W_conv3 = tf.Variable(tf.truncated_normal([3, 3, 64, 32], stddev=0.01))
+        b_conv3 = tf.Variable(tf.constant(0.01, shape=[64]))
+
+        W_fc1 = tf.Variable(tf.truncated_normal([1600, 512], stddev=0.01))
+        b_fc1 = tf.Variable(tf.constant(0.01, shape=[512]))
+
+        W_fc2 = tf.Variable(tf.truncated_normal([512, self.ACTIONS], stddev=0.01))
+        b_fc2 = tf.Variable(tf.constant(0.01, shape=[self.ACTIONS]))
+
+        # input layer
+        s = tf.placeholder("float", [None, 80, 80, 4])
+
+        # hidden layers
+        h_conv1 = tf.nn.relu(self._conv2d(s, W_conv1, 4) + b_conv1)
+        h_pool1 = self._max_pool_2x2(h_conv1)
+        h_conv2 = tf.nn.relu(self._conv2d(h_pool1, W_conv2, 2) + b_conv2)
+        h_conv3 = tf.nn.relu(self._conv2d(h_conv2, W_conv3, 1) + b_conv3)
+        h_conv3_flat = tf.reshape(h_conv3, [-1, 1600])
+        h_fc1 = tf.nn.relu(tf.matmul(h_conv3_flat, W_fc1) + b_fc1)
+
+        # output layer
+        readout = tf.matmul(h_fc1, W_fc2) + b_fc2
+
+        self.model = (s, readout, h_fc1)  # inputlayer, readout, output layer
+
+        a = tf.placeholder("float", [None, self.ACTIONS])
+        y = tf.placeholder("float", [None])
+        readout_action = tf.reduce_sum(tf.mul(readout, a), reduction_indices=1)
+        cost = tf.reduce_mean(tf.square(y - readout_action))
+        train_step = tf.train.AdamOptimizer(1e-6).minimize(cost)
+        self.train_model = (a, y, train_step)
+
+    def observe(self, state, action, reward, terminal):
+
+        # if initialize the first state
+        if self.itr_num < 0:
+            self.prev_state = state
+            self.prev_reward = np.zeros(self.ACTIONS)
+            self.prev_reward[0] = 1
+            self.itr_num = self.itr_num + 1
+            return
+
+        # store the transition states in memory
+        self.memory.append((self.prev_state, action, reward, state, terminal))
+        if len(self.memory) > self.MEMORY_FRAMES:
+            self.memory.popleft()
+
+        # train after done observing
+        if self.itr_num > self.OBSERVE:
+            # sample a minibatch to train on
+            minibatch = random.sample(self.memory, self.BATCH_SIZE)
+
+            # get the batch variables
+            s_j_batch = [d[0] for d in minibatch]
+            a_batch = [d[1] for d in minibatch]
+            r_batch = [d[2] for d in minibatch]
+            s_j1_batch = [d[3] for d in minibatch]
+
+            y_batch = []
+            readout_j1_batch = self.model[1].eval(feed_dict = {self.model[0]: s_j1_batch})
+            for i in range(0, len(minibatch)):
+                terminal = minibatch[i][4]
+                # if terminal, only equals reward
+                if terminal:
+                    y_batch.append(r_batch[i])
+                else:
+                    y_batch.append(r_batch[i] + self.GAMMA * np.max(readout_j1_batch[i]))
+
+            # perform gradient step
+            self.train_model[2].run(feed_dict={self.train_model[1]: y_batch, self.train_model[0]: a_batch,
+                                               self.model[0]: s_j_batch})
+            self.prev_state = state
+            self.itr_num = self.itr_num + 1
+
+            # save progress every 10000 iterations
+            if self.itr_num % self.SAVE_FREQ == 0:
+                self.saver.save(self.session, 'saved_networks/' + self.GAME_NAME + '-dqn', global_step=t)
+
+    def act(self):
+        # evaluvate the network
+        readout_t = self.model[1].eval(feed_dict={self.model[0]: [self.prev_state]})[0]
+
+        a_t = np.zeros([self.ACTIONS])
+        if self.itr_num % self.FRAMES_PER_ACTION == 0:
+            if random.random() <= self.epsilon:
+                a_t[random.randrange(self.ACTIONS)] = 1
+            else:
+                a_t[np.argmax(readout_t)] = 1
+        else:
+            a_t[0] = 1
+
+        self.prev_reward = a_t
+
+        # vary epsilon
+        if self.epsilon  >  self.FINAL_EPSILON and self.itr_num > self.OBSERVE:
+            self.epsilon -= (self.INITIAL_EPSILON - self.FINAL_EPSILON) / self.EXPLORE_FRAMES
 
 
+    def _conv2d(self, x, W, stride):
+        return tf.nn.conv2d(x, W, strides=[1, stride, stride, 1], padding="SAME")
 
-        def weight_variable(shape):
-            initial = tf.truncated_normal(shape, stddev=0.01)
-            return tf.Variable(initial)
-
-        def bias_variable(shape):
-            initial = tf.constant(0.01, shape=shape)
-            return tf.Variable(initial)
-
-        def conv2d(x, W, stride):
-            return tf.nn.conv2d(x, W, strides=[1, stride, stride, 1], padding="SAME")
-
-        def max_pool_2x2(x):
-            return tf.nn.max_pool(x, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding="SAME")
+    def _max_pool_2x2(self, x):
+        return tf.nn.max_pool(x, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding="SAME")
 
