@@ -107,24 +107,24 @@ class Agent(object):
             minibatch = random.sample(self.memory, self.BATCH_SIZE)
 
             # get the batch variables
-            s_j_batch = [d[0] for d in minibatch]
-            a_batch = [d[1] for d in minibatch]
-            r_batch = [d[2] for d in minibatch]
-            s_j1_batch = [d[3] for d in minibatch]
+            state_batch = [d[0] for d in minibatch]
+            action_batch = [d[1] for d in minibatch]
+            reward_batch = [d[2] for d in minibatch]
+            next_state_batch = [d[3] for d in minibatch]
 
             y_batch = []
-            readout_j1_batch = self.model[1].eval(feed_dict={self.model[0]: s_j1_batch})
+            readout_batch = self.model[1].eval(feed_dict={self.model[0]: next_state_batch})
             for i in range(0, len(minibatch)):
                 terminal = minibatch[i][4]
                 # if terminal, only equals reward
                 if terminal:
-                    y_batch.append(r_batch[i])
+                    y_batch.append(reward_batch[i])
                 else:
-                    y_batch.append(r_batch[i] + self.GAMMA * np.max(readout_j1_batch[i]))
+                    y_batch.append(reward_batch[i] + self.GAMMA * np.max(readout_batch[i]))
 
             # perform gradient step
-            self.train_model[2].run(feed_dict={self.train_model[1]: y_batch, self.train_model[0]: a_batch,
-                                               self.model[0]: s_j_batch})
+            self.train_model[2].run(feed_dict={self.train_model[1]: y_batch, self.train_model[0]: action_batch,
+                                               self.model[0]: state_batch})
         self.prev_state = state
         self.itr_num = self.itr_num + 1
 
@@ -135,13 +135,13 @@ class Agent(object):
         # print info
         self.STATE = ""
         if self.itr_num <= self.OBSERVE:
-            state = "observe"
+            self.STATE = "observe"
         elif self.itr_num > self.OBSERVE and self.itr_num <= self.OBSERVE + self.EXPLORE_FRAMES:
-            state = "explore"
+            self.STATE = "explore"
         else:
-            state = "train"
+            self.STATE = "train"
 
-        print("Iteration", self.itr_num, "/ State", state,
+        print("Iteration", self.itr_num, "/ State", self.STATE,
               "/ Epsilon", self.epsilon, "/ Action", self.prev_action, "/ Reward", reward)
 
     def act(self):
