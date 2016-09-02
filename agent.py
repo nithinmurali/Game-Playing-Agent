@@ -6,11 +6,10 @@ import random
 import numpy as np
 from collections import deque
 
-# Hyperparameters
 
 class Agent(object):
 
-    def __init__(self, actions=2, gamma=0.99, observe=100000., initial_epsilon=0.0001,final_epsilon=0.0001,
+    def __init__(self, actions=2, gamma=0.99, observe=50000., initial_epsilon=0.0001, final_epsilon=0.0001,
                  explore_frames=2000000., memory_frames=50000, batch_size=32, save_freq=10000):
         self.GAMMA = gamma  # decay rate of past observations
         self.OBSERVE = observe  # to fill the replay memory
@@ -29,14 +28,14 @@ class Agent(object):
         self.GAME_NAME = 'FLAPPY'
 
         self.itr_num = -1
-        self.cur_action =np.zeros(self.ACTIONS)
         self.epsilon = self.INITIAL_EPSILON
-
         self.prev_state = None
-        self.prev_reward = None
+        self.prev_action = np.zeros(self.ACTIONS)  # no action
+        self.prev_action[0] = 1
 
         self.memory = deque()
         self.session = tf.InteractiveSession()
+        self.build_model()
         self.saver = self._init_saver()
 
     def _init_saver(self, path="saved_networks"):
@@ -57,7 +56,7 @@ class Agent(object):
         W_conv2 = tf.Variable(tf.truncated_normal([4, 4, 32, 64], stddev=0.01))
         b_conv2 = tf.Variable(tf.constant(0.01, shape=[64]))
 
-        W_conv3 = tf.Variable(tf.truncated_normal([3, 3, 64, 32], stddev=0.01))
+        W_conv3 = tf.Variable(tf.truncated_normal([3, 3, 64, 64], stddev=0.01))
         b_conv3 = tf.Variable(tf.constant(0.01, shape=[64]))
 
         W_fc1 = tf.Variable(tf.truncated_normal([1600, 512], stddev=0.01))
@@ -89,18 +88,16 @@ class Agent(object):
         train_step = tf.train.AdamOptimizer(1e-6).minimize(cost)
         self.train_model = (a, y, train_step)
 
-    def observe(self, state, action, reward, terminal):
+    def observe(self, state, reward, terminal):
 
         # if initialize the first state
         if self.itr_num < 0:
             self.prev_state = state
-            self.prev_reward = np.zeros(self.ACTIONS)
-            self.prev_reward[0] = 1
             self.itr_num = self.itr_num + 1
             return
 
         # store the transition states in memory
-        self.memory.append((self.prev_state, action, reward, state, terminal))
+        self.memory.append((self.prev_state, self.prev_action, reward, state, terminal))
         if len(self.memory) > self.MEMORY_FRAMES:
             self.memory.popleft()
 
@@ -116,7 +113,7 @@ class Agent(object):
             s_j1_batch = [d[3] for d in minibatch]
 
             y_batch = []
-            readout_j1_batch = self.model[1].eval(feed_dict = {self.model[0]: s_j1_batch})
+            readout_j1_batch = self.model[1].eval(feed_dict={self.model[0]: s_j1_batch})
             for i in range(0, len(minibatch)):
                 terminal = minibatch[i][4]
                 # if terminal, only equals reward
@@ -128,14 +125,29 @@ class Agent(object):
             # perform gradient step
             self.train_model[2].run(feed_dict={self.train_model[1]: y_batch, self.train_model[0]: a_batch,
                                                self.model[0]: s_j_batch})
-            self.prev_state = state
-            self.itr_num = self.itr_num + 1
+        self.prev_state = state
+        self.itr_num = self.itr_num + 1
 
-            # save progress every 10000 iterations
-            if self.itr_num % self.SAVE_FREQ == 0:
-                self.saver.save(self.session, 'saved_networks/' + self.GAME_NAME + '-dqn', global_step=t)
+        # save progress every 10000 iterations
+        if self.itr_num % self.SAVE_FREQ == 0:
+            self.saver.save(self.session, 'saved_networks/' + self.GAME_NAME + '-dqn', global_step=t)
+
+        # print info
+        self.STATE = ""
+        if self.itr_num <= self.OBSERVE:
+            state = "observe"
+        elif self.itr_num > self.OBSERVE and self.itr_num <= self.OBSERVE + self.EXPLORE_FRAMES:
+            state = "explore"
+        else:
+            state = "train"
+
+        print("Iteration", self.itr_num, "/ State", state,
+              "/ Epsilon", self.epsilon, "/ Action", self.prev_action, "/ Reward", reward)
 
     def act(self):
+        if self.itr_num < 0:
+            return self.prev_action
+
         # evaluvate the network
         readout_t = self.model[1].eval(feed_dict={self.model[0]: [self.prev_state]})[0]
 
@@ -148,11 +160,13 @@ class Agent(object):
         else:
             a_t[0] = 1
 
-        self.prev_reward = a_t
+        self.prev_action = a_t
 
         # vary epsilon
-        if self.epsilon  >  self.FINAL_EPSILON and self.itr_num > self.OBSERVE:
+        if self.epsilon > self.FINAL_EPSILON and self.itr_num > self.OBSERVE:
             self.epsilon -= (self.INITIAL_EPSILON - self.FINAL_EPSILON) / self.EXPLORE_FRAMES
+
+        return self.prev_action
 
 
     def _conv2d(self, x, W, stride):
